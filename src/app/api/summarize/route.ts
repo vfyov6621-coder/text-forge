@@ -7,8 +7,6 @@ import { extractContentFromUrl } from "@/lib/extract-content";
  * Поддерживает два бэкенда:
  * 1. Локальный inference-сервер (llama.cpp) — порт 8081
  * 2. z-ai-web-dev-sdk (cloud fallback)
- *
- * Клиент может передать backend: "local" | "cloud"
  */
 
 const INFERENCE_PORT = 8081;
@@ -62,6 +60,13 @@ export async function POST(request: Request) {
       );
     }
 
+    // ─── Ограничение длины текста ────────────────────────
+    let textForSummary = extracted.text;
+    const MAX_CHARS = 30000;
+    if (textForSummary.length > MAX_CHARS) {
+      textForSummary = textForSummary.slice(0, MAX_CHARS);
+    }
+
     // ─── Построение промта ────────────────────────────────
     const targetPercent = 100 - compressionPercent;
     const targetWords = Math.round(
@@ -98,7 +103,7 @@ export async function POST(request: Request) {
 9. ОРИЕНТИРОВОЧНЫЙ ОБЪЕМ: примерно ${targetWords} слов.
 
 ТЕКСТ ДЛЯ ПЕРЕСКАЗА:
-${extracted.text}`;
+${textForSummary}`;
 
     // ─── Вызов ИИ ─────────────────────────────────────────
     let summary: string;
@@ -107,12 +112,7 @@ ${extracted.text}`;
     let tokensGenerated = 0;
 
     if (backend === "local") {
-      // Локальный inference-сервер (llama.cpp)
-      const result = await callLocalInference(
-        model,
-        systemPrompt,
-        userPrompt
-      );
+      const result = await callLocalInference(model, systemPrompt, userPrompt);
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: 502 });
       }
@@ -121,12 +121,7 @@ ${extracted.text}`;
       tokensPrompt = result.tokens_prompt || 0;
       tokensGenerated = result.tokens_generated || 0;
     } else {
-      // Cloud fallback: z-ai-web-dev-sdk
-      const result = await callCloudInference(
-        model,
-        systemPrompt,
-        userPrompt
-      );
+      const result = await callCloudInference(model, systemPrompt, userPrompt);
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: 502 });
       }
@@ -141,9 +136,7 @@ ${extracted.text}`;
       );
     }
 
-    const summaryWordCount = summary
-      .split(/\s+/)
-      .filter((w) => w.length > 0).length;
+    const summaryWordCount = summary.split(/\s+/).filter((w) => w.length > 0).length;
 
     return NextResponse.json({
       summary,
@@ -177,19 +170,16 @@ async function callLocalInference(
   tokens_generated?: number;
   error?: string;
 }> {
-  const baseUrl = `/api/inference?XTransformPort=${INFERENCE_PORT}`;
-
   try {
-    // Проверяем здоровье сервера
-    const healthRes = await fetch(`${baseUrl}/health`, {
+    // FIX: Правильный URL — XTransformPort как query-параметр
+    const healthRes = await fetch(`/health?XTransformPort=${INFERENCE_PORT}`, {
       signal: AbortSignal.timeout(5000),
     });
     if (!healthRes.ok) {
-      return { error: "Inference-сервер недоступен. Убедитесь, что он запущен." };
+      return { error: "Inference-сервер недоступен. Убедитесь, что он запущен (порт 8081)." };
     }
 
-    // Вызываем суммаризацию
-    const res = await fetch(`${baseUrl}/summarize`, {
+    const res = await fetch(`/summarize?XTransformPort=${INFERENCE_PORT}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -197,16 +187,15 @@ async function callLocalInference(
         system_prompt: systemPrompt,
         user_prompt: userPrompt,
       }),
-      signal: AbortSignal.timeout(300000), // 5 мин таймаут для локальных моделей
+      signal: AbortSignal.timeout(300000),
     });
 
     const data = await res.json();
     return data;
   } catch (err: unknown) {
-    const msg =
-      err instanceof Error ? err.message : "Не удалось подключиться к inference-серверу";
+    const msg = err instanceof Error ? err.message : "Не удалось подключиться к inference-серверу";
     return {
-      error: `Локальный сервер: ${msg}. Запустите: cd mini-services/inference-server && ./start.sh`,
+      error: `Локальный сервер: ${msg}. Запустите: cd mini-services/inference-server && python3 server.py`,
     };
   }
 }
