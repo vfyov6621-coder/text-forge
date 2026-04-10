@@ -15,6 +15,11 @@ import {
   ExternalLink,
   AlertCircle,
   FileText,
+  Server,
+  Cloud,
+  Shield,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,9 +29,10 @@ import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { detectHardware, type HardwareInfo } from '@/lib/hardware-check';
+
+// ─── Утилиты ──────────────────────────────────────────────────────────
 
 function isValidUrl(str: string): boolean {
   try {
@@ -71,21 +77,42 @@ function getScoreColor(score: number): string {
   return 'bg-emerald-500';
 }
 
+function getScoreTextColor(score: number): string {
+  if (score < 40) return 'text-red-600';
+  if (score <= 70) return 'text-amber-600';
+  return 'text-emerald-600';
+}
+
 function getScoreLabel(info: HardwareInfo): string {
   if (info.isWeak) return 'Слабая';
   if (info.isMedium) return 'Средняя';
   return 'Мощная';
 }
 
+interface ServerStatus {
+  online: boolean;
+  currentModel: string | null;
+  loadedModels: string[];
+}
+
+// ─── Компонент ────────────────────────────────────────────────────────
+
 export default function Home() {
   const [url, setUrl] = useState('');
   const [compressionPercent, setCompressionPercent] = useState(30);
   const [model, setModel] = useState<'qwen' | 'mistral'>('qwen');
+  const [backend, setBackend] = useState<'local' | 'cloud'>('local');
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [checkingServer, setCheckingServer] = useState(false);
+
   const [summary, setSummary] = useState('');
   const [pageTitle, setPageTitle] = useState('');
   const [originalWordCount, setOriginalWordCount] = useState(0);
   const [summaryWordCount, setSummaryWordCount] = useState(0);
+  const [usedModel, setUsedModel] = useState('');
+  const [usedTokens, setUsedTokens] = useState({ prompt: 0, generated: 0 });
+
   const [isLoading, setIsLoading] = useState(false);
   const [loadingStage, setLoadingStage] = useState<'fetching' | 'summarizing'>('fetching');
   const [error, setError] = useState('');
@@ -94,18 +121,57 @@ export default function Home() {
 
   const urlValid = url.trim().length > 0 && isValidUrl(url.trim());
 
-  // Detect hardware on mount
+  // ─── Инициализация ─────────────────────────────────────────────────
   useEffect(() => {
     const hw = detectHardware();
     setHardware(hw);
     setModel(hw.recommendedModel);
   }, []);
 
+  // Проверка inference-сервера
+  const checkServer = useCallback(async () => {
+    setCheckingServer(true);
+    try {
+      const res = await fetch('/api/inference?XTransformPort=8081/health', {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setServerStatus({
+          online: true,
+          currentModel: data.current_model,
+          loadedModels: data.loaded_models || [],
+        });
+      } else {
+        setServerStatus({ online: false, currentModel: null, loadedModels: [] });
+      }
+    } catch {
+      setServerStatus({ online: false, currentModel: null, loadedModels: [] });
+    } finally {
+      setCheckingServer(false);
+    }
+  }, []);
+
+  // При переключении на local — проверяем сервер
+  useEffect(() => {
+    if (backend === 'local') {
+      checkServer();
+    }
+  }, [backend, checkServer]);
+
+  // Периодическая проверка
+  useEffect(() => {
+    if (backend !== 'local') return;
+    const interval = setInterval(checkServer, 15000);
+    return () => clearInterval(interval);
+  }, [backend, checkServer]);
+
   const compressionColor = useMemo(() => getCompressionColor(compressionPercent), [compressionPercent]);
   const compressionBgColor = useMemo(() => getCompressionBgColor(compressionPercent), [compressionPercent]);
   const compressionLabel = useMemo(() => getCompressionLabel(compressionPercent), [compressionPercent]);
   const compressionDesc = useMemo(() => getCompressionDescription(compressionPercent), [compressionPercent]);
 
+  // ─── Суммаризация ───────────────────────────────────────────────────
   const handleSummarize = useCallback(async () => {
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
@@ -123,6 +189,8 @@ export default function Home() {
     setPageTitle('');
     setOriginalWordCount(0);
     setSummaryWordCount(0);
+    setUsedModel('');
+    setUsedTokens({ prompt: 0, generated: 0 });
     setLoadingStage('fetching');
 
     try {
@@ -133,6 +201,7 @@ export default function Home() {
           url: trimmedUrl,
           compressionPercent,
           model,
+          backend,
         }),
       });
 
@@ -150,13 +219,18 @@ export default function Home() {
       setPageTitle(data.title || '');
       setOriginalWordCount(data.originalWordCount || 0);
       setSummaryWordCount(data.summaryWordCount || 0);
+      setUsedModel(data.model || '');
+      setUsedTokens({
+        prompt: data.tokensPrompt || 0,
+        generated: data.tokensGenerated || 0,
+      });
     } catch {
       setError('Не удалось подключиться к серверу');
       toast({ title: 'Ошибка', description: 'Не удалось подключиться к серверу', variant: 'destructive' });
     } finally {
       setIsLoading(false);
     }
-  }, [url, compressionPercent, model, toast]);
+  }, [url, compressionPercent, model, backend, toast]);
 
   const handleCopy = useCallback(async () => {
     if (!summary) return;
@@ -180,7 +254,7 @@ export default function Home() {
     [handleSummarize]
   );
 
-  // Global Ctrl+Enter handler
+  // Global Ctrl+Enter
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -196,38 +270,55 @@ export default function Home() {
     ? Math.round((1 - summaryWordCount / originalWordCount) * 100)
     : 0;
 
+  const isServerOnline = serverStatus?.online === true;
+  const canSummarize = backend === 'cloud' || isServerOnline;
+
+  // ─── Render ─────────────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
       {/* Header */}
-      <header className="h-14 border-b flex items-center justify-between px-6 shrink-0">
+      <header className="h-14 border-b flex items-center justify-between px-6 shrink-0 bg-background/95 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/40">
             <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
           </div>
           <div>
             <h1 className="text-base font-bold tracking-tight leading-none">TextForge</h1>
-            <p className="text-[11px] text-muted-foreground leading-none mt-0.5">AI Суммаризатор ссылок</p>
+            <p className="text-[11px] text-muted-foreground leading-none mt-0.5">
+              AI Суммаризатор ссылок
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Backend indicator */}
+          {backend === 'local' ? (
+            <Badge
+              variant={isServerOnline ? 'secondary' : 'destructive'}
+              className="text-[11px] gap-1 px-2 py-0.5"
+            >
+              {isServerOnline ? <Server className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+              {isServerOnline ? 'Локальный ИИ' : 'Сервер выключен'}
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="text-[11px] gap-1 px-2 py-0.5">
+              <Cloud className="w-3 h-3" />
+              Cloud API
+            </Badge>
+          )}
           {hardware && (
             <Badge variant="outline" className="text-[11px] gap-1.5 px-2 py-0.5">
               <Cpu className="w-3 h-3" />
               {getScoreLabel(hardware)} ({hardware.score})
             </Badge>
           )}
-          <Badge variant="secondary" className="text-[11px] gap-1 px-2 py-0.5 capitalize">
-            <Zap className="w-3 h-3" />
-            {model}
-          </Badge>
         </div>
       </header>
 
-      {/* Main Content — Two Column */}
+      {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
-        {/* Left Panel — Controls */}
+        {/* ─── Left Panel ─── */}
         <div className="w-[380px] shrink-0 border-r overflow-y-auto">
-          <div className="p-5 space-y-6">
+          <div className="p-5 space-y-5">
             {/* URL Input */}
             <div className="space-y-2">
               <Label className="text-sm font-medium flex items-center gap-1.5">
@@ -244,25 +335,16 @@ export default function Home() {
                   className={`h-10 text-sm ${url.trim().length > 0 && !urlValid ? 'border-red-500 focus-visible:ring-red-500/30' : ''}`}
                   disabled={isLoading}
                 />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="shrink-0 h-10 w-10"
-                  disabled={isLoading || !url.trim()}
-                  title="Загрузить и суммаризировать"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </Button>
               </div>
               {url.trim().length > 0 && !urlValid && (
                 <p className="text-xs text-red-500">Некорректный формат URL</p>
               )}
             </div>
 
-            {/* Main Action Button */}
+            {/* Main Action */}
             <Button
               onClick={handleSummarize}
-              disabled={isLoading || !urlValid}
+              disabled={isLoading || !urlValid || !canSummarize}
               className="w-full h-11 text-sm font-semibold gap-2"
             >
               {isLoading ? (
@@ -277,6 +359,56 @@ export default function Home() {
                 </>
               )}
             </Button>
+
+            {!canSummarize && backend === 'local' && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                <WifiOff className="w-3 h-3 shrink-0" />
+                Запустите inference-сервер: cd mini-services/inference-server && python server.py
+              </p>
+            )}
+
+            <Separator />
+
+            {/* Backend Toggle */}
+            <div className="space-y-2.5">
+              <Label className="text-sm font-medium flex items-center gap-1.5">
+                <Shield className="w-3.5 h-3.5" />
+                Бэкенд ИИ
+              </Label>
+              <Tabs value={backend} onValueChange={(v) => setBackend(v as 'local' | 'cloud')} className="w-full">
+                <TabsList className="w-full h-10">
+                  <TabsTrigger value="local" className="flex-1 gap-1.5 text-xs">
+                    <Server className="w-3 h-3" />
+                    Локальный
+                    {checkingServer && <Loader2 className="w-3 h-3 animate-spin opacity-50" />}
+                    {!checkingServer && isServerOnline && (
+                      <Wifi className="w-3 h-3 text-emerald-500" />
+                    )}
+                    {!checkingServer && !isServerOnline && backend === 'local' && (
+                      <WifiOff className="w-3 h-3 text-red-400" />
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="cloud" className="flex-1 gap-1.5 text-xs">
+                    <Cloud className="w-3 h-3" />
+                    Cloud API
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                {backend === 'local'
+                  ? 'GGUF-модели работают локально на вашем ПК. Приватность 100%. Требует запущенный inference-сервер.'
+                  : 'Cloud API работает через интернет. Не требует локальных ресурсов, но данные отправляются на сервер.'}
+              </p>
+              {backend === 'local' && isServerOnline && serverStatus?.loadedModels && serverStatus.loadedModels.length > 0 && (
+                <div className="flex gap-1.5 flex-wrap">
+                  {serverStatus.loadedModels.map((m) => (
+                    <Badge key={m} variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-emerald-600 border-emerald-300">
+                      {m} ✓ загружена
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <Separator />
 
@@ -313,12 +445,8 @@ export default function Home() {
               >
                 <div className={`w-2 h-2 rounded-full ${compressionBgColor} shrink-0`} />
                 <div>
-                  <p className={`text-xs font-semibold ${compressionColor}`}>
-                    {compressionLabel}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    {compressionDesc}
-                  </p>
+                  <p className={`text-xs font-semibold ${compressionColor}`}>{compressionLabel}</p>
+                  <p className="text-[11px] text-muted-foreground">{compressionDesc}</p>
                 </div>
               </motion.div>
             </div>
@@ -328,30 +456,53 @@ export default function Home() {
             {/* Model Selector */}
             <div className="space-y-2.5">
               <Label className="text-sm font-medium">AI Модель</Label>
-              <Tabs
-                value={model}
-                onValueChange={(v) => setModel(v as 'qwen' | 'mistral')}
-                className="w-full"
-              >
-                <TabsList className="w-full h-10">
-                  <TabsTrigger value="qwen" className="flex-1 gap-1.5 text-xs">
-                    {model === 'qwen' && hardware?.recommendedModel === 'qwen' && (
-                      <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 text-emerald-600 border-emerald-300">★</Badge>
+              <Tabs value={model} onValueChange={(v) => setModel(v as 'qwen' | 'mistral')} className="w-full">
+                <TabsList className="w-full h-auto flex-col gap-1 p-1">
+                  <TabsTrigger
+                    value="qwen"
+                    className="w-full justify-start gap-2 h-9 text-xs rounded-md px-3"
+                  >
+                    <Zap className="w-3 h-3 text-amber-500" />
+                    <div className="flex-1 text-left">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">Qwen 2.5 1.5B</span>
+                        <span className="text-[9px] text-muted-foreground">(Q4_K_M)</span>
+                      </div>
+                    </div>
+                    {hardware?.recommendedModel === 'qwen' && (
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 text-emerald-600 border-emerald-300 shrink-0">
+                        Рек.
+                      </Badge>
                     )}
-                    Qwen Plus
                   </TabsTrigger>
-                  <TabsTrigger value="mistral" className="flex-1 gap-1.5 text-xs">
-                    {model === 'mistral' && hardware?.recommendedModel === 'mistral' && (
-                      <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 text-emerald-600 border-emerald-300">★</Badge>
+                  <TabsTrigger
+                    value="mistral"
+                    className="w-full justify-start gap-2 h-9 text-xs rounded-md px-3"
+                  >
+                    <Zap className="w-3 h-3 text-purple-500" />
+                    <div className="flex-1 text-left">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">Mistral 7B</span>
+                        <span className="text-[9px] text-muted-foreground">(Instruct v0.3 Q4_K_M)</span>
+                      </div>
+                    </div>
+                    {hardware?.recommendedModel === 'mistral' && (
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 text-emerald-600 border-emerald-300 shrink-0">
+                        Рек.
+                      </Badge>
                     )}
-                    Mistral Large
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                {model === 'qwen'
+                  ? 'Лёгкая модель (~1.1 ГБ). Быстрая генерация. Подходит для слабых ПК.'
+                  : 'Мощная модель (~4.1 ГБ). Качественный пересказ. Требует 8+ ГБ RAM.'}
+              </p>
               {hardware && model !== hardware.recommendedModel && (
                 <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-1">
                   <AlertCircle className="w-3 h-3 shrink-0" />
-                  Рекомендуется: {hardware.recommendedModel === 'qwen' ? 'Qwen Plus' : 'Mistral Large'} (для вашего железа)
+                  Для вашего железа рекомендуется: {hardware.recommendedModel === 'qwen' ? 'Qwen 2.5 1.5B' : 'Mistral 7B'}
                 </p>
               )}
             </div>
@@ -368,32 +519,34 @@ export default function Home() {
                 <div className="space-y-2.5 p-3 rounded-lg bg-muted/30 border border-border text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground flex items-center gap-1.5">
-                      <Cpu className="w-3.5 h-3.5" />
-                      CPU
+                      <Cpu className="w-3.5 h-3.5" /> CPU
                     </span>
                     <span className="font-medium">{hardware.cpuCores} ядер</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground flex items-center gap-1.5">
-                      <HardDrive className="w-3.5 h-3.5" />
-                      RAM
+                      <HardDrive className="w-3.5 h-3.5" /> RAM
                     </span>
                     <span className="font-medium">{hardware.deviceMemory} ГБ</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground flex items-center gap-1.5">
-                      <Monitor className="w-3.5 h-3.5" />
-                      GPU
+                      <Monitor className="w-3.5 h-3.5" /> GPU
                     </span>
-                    <span className="font-medium text-right max-w-[200px] truncate" title={hardware.gpuRenderer}>
-                      {hardware.gpuRenderer !== 'Unknown' ? hardware.gpuRenderer.split('/').pop()?.split('(')[0]?.trim() || hardware.gpuRenderer : 'Не определено'}
+                    <span
+                      className="font-medium text-right max-w-[200px] truncate"
+                      title={hardware.gpuRenderer}
+                    >
+                      {hardware.gpuRenderer !== 'Unknown'
+                        ? hardware.gpuRenderer.split('/').pop()?.split('(')[0]?.trim() || hardware.gpuRenderer
+                        : 'Не определено'}
                     </span>
                   </div>
                   <Separator className="my-1" />
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Оценка</span>
-                      <span className={`font-semibold ${getScoreColor(hardware.score).replace('bg-', 'text-').replace('-500', '-600')}`}>
+                      <span className={`font-semibold ${getScoreTextColor(hardware.score)}`}>
                         {hardware.score}/100
                       </span>
                     </div>
@@ -410,7 +563,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right Panel — Result */}
+        {/* ─── Right Panel ─── */}
         <div className="flex-1 overflow-y-auto">
           <div className="h-full flex flex-col">
             <AnimatePresence mode="wait">
@@ -422,11 +575,13 @@ export default function Home() {
                   exit={{ opacity: 0 }}
                   className="flex-1 flex flex-col"
                 >
-                  {/* Loading skeleton with status */}
                   <div className="flex-1 p-6 space-y-4">
                     <div className="flex items-center gap-2 text-sm text-muted-foreground mb-6">
                       <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
                       {loadingStage === 'fetching' ? 'Загружаю страницу...' : 'Анализирую текст...'}
+                      <span className="text-xs text-muted-foreground/50">
+                        ({backend === 'local' ? 'локально' : 'cloud'})
+                      </span>
                     </div>
                     <Skeleton className="h-5 w-3/4" />
                     <Skeleton className="h-4 w-full" />
@@ -458,9 +613,7 @@ export default function Home() {
                       <AlertCircle className="w-6 h-6 text-red-500" />
                     </div>
                     <p className="text-sm text-red-600 dark:text-red-400 font-medium">{error}</p>
-                    <p className="text-xs text-muted-foreground">
-                      Проверьте ссылку и попробуйте снова
-                    </p>
+                    <p className="text-xs text-muted-foreground">Проверьте ссылку и попробуйте снова</p>
                   </div>
                 </motion.div>
               ) : summary ? (
@@ -482,26 +635,21 @@ export default function Home() {
                           </p>
                         </div>
                       )}
-                      <p className="text-xs text-muted-foreground">
-                        Пересказ создан моделью {model === 'qwen' ? 'Qwen Plus' : 'Mistral Large'}
-                      </p>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 gap-1">
+                          {backend === 'local' ? <Server className="w-2.5 h-2.5" /> : <Cloud className="w-2.5 h-2.5" />}
+                          {usedModel}
+                        </Badge>
+                        {usedTokens.generated > 0 && (
+                          <span>{usedTokens.prompt}+{usedTokens.generated} токенов</span>
+                        )}
+                      </div>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleCopy}
-                      className="h-8 text-xs gap-1.5 shrink-0"
-                    >
+                    <Button variant="ghost" size="sm" onClick={handleCopy} className="h-8 text-xs gap-1.5 shrink-0">
                       {copied ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          Скопировано
-                        </>
+                        <><Check className="w-3.5 h-3.5 text-emerald-500" /> Скопировано</>
                       ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          Копировать
-                        </>
+                        <><Copy className="w-3.5 h-3.5" /> Копировать</>
                       )}
                     </Button>
                   </div>
@@ -517,18 +665,22 @@ export default function Home() {
 
                   <Separator />
 
-                  {/* Stats bar */}
+                  {/* Stats */}
                   <div className="px-6 py-3 flex items-center gap-4 shrink-0 bg-muted/20">
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>{originalWordCount} слов в оригинале</span>
+                      <span>{originalWordCount} слов</span>
                       <span>→</span>
-                      <span>{summaryWordCount} слов в пересказе</span>
+                      <span>{summaryWordCount} слов</span>
                     </div>
                     {compressionRatio > 0 && (
                       <Badge variant="outline" className="text-xs font-medium">
                         Сжатие: {compressionRatio}%
                       </Badge>
                     )}
+                    <Badge variant="outline" className="text-xs font-medium gap-1">
+                      <Shield className="w-3 h-3" />
+                      Анти-галлюцинации
+                    </Badge>
                   </div>
                 </motion.div>
               ) : (
@@ -544,11 +696,9 @@ export default function Home() {
                       <Link className="w-8 h-8 text-muted-foreground/40" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-muted-foreground">
-                        Вставьте ссылку на статью...
-                      </p>
+                      <p className="text-sm font-medium text-muted-foreground">Вставьте ссылку на статью...</p>
                       <p className="text-xs text-muted-foreground/60 mt-1">
-                        Приложение загрузит содержимое страницы и создаст краткий пересказ
+                        Приложение загрузит содержимое и создаст краткий пересказ
                       </p>
                     </div>
                     <div className="text-[11px] text-muted-foreground/50 flex items-center gap-1.5">
@@ -568,7 +718,7 @@ export default function Home() {
       {/* Footer */}
       <footer className="h-8 border-t flex items-center justify-center shrink-0 bg-background/80">
         <p className="text-[11px] text-muted-foreground">
-          TextForge © 2026
+          TextForge © 2026 — Локальные GGUF модели + Anti-Hallucination
         </p>
       </footer>
     </div>

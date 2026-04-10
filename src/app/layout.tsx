@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "TextForge — AI Суммаризатор ссылок",
-  description: "Десктопное приложение для суммаризации веб-страниц с выбором AI-модели",
-  keywords: ["суммаризатор", "TextForge", "AI", "ИИ", "пересказ", "ссылки", "веб-страницы"],
+  description: "Десктопное приложение для суммаризации веб-страниц с локальными GGUF-моделями (Qwen 2.5, Mistral 7B)",
+  keywords: ["суммаризатор", "TextForge", "AI", "GGUF", "llama.cpp", "Qwen", "Mistral", "пересказ", "ссылки"],
   authors: [{ name: "Z.ai Team" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
